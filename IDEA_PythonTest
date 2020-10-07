@@ -1,0 +1,248 @@
+_NUM_ROUNDS = 8
+from random import randint
+ 
+ 
+def convert_base(num, to_base=10, from_base=10):
+    # first convert to decimal number
+    if isinstance(num, str):
+        n = int(num, from_base)
+    else:
+        n = int(num)
+    # now convert decimal to 'to_base' base
+    alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    if n < to_base:
+        return alphabet[n]
+    else:
+        return convert_base(n // to_base, to_base) + alphabet[n % to_base]
+    
+    
+def text_to_bits(text):
+    bits = bin(int.from_bytes(text.encode(),"big"))[2:]
+    return bits.zfill(8 * ((len(bits) + 7) // 8))
+ 
+def text_from_bits(bits):
+    n = int(bits, 2)
+    return n.to_bytes((n.bit_length() + 7) // 8,"big").decode() or '\0'
+ 
+def _add(x, y):
+    assert 0 <= x <= 0xFFFF
+    assert 0 <= y <= 0xFFFF
+    return (x + y) & 0xFFFF
+ 
+ 
+def _multiply(x, y):
+    assert 0 <= x <= 0xFFFF
+    assert 0 <= y <= 0xFFFF
+    if x == 0x0000:
+        x = 0x10000
+    if y == 0x0000:
+        y = 0x10000
+    z = (x * y) % 0x10001
+    if z == 0x10000:
+        z = 0x0000
+    assert 0 <= z <= 0xFFFF
+    return z
+ 
+def _negate(x):
+    assert 0 <= x <= 0xFFFF
+    return (-x) & 0xFFFF
+ 
+ 
+def _reciprocal(x):
+    assert 0 <= x <= 0xFFFF
+    if x == 0:
+        return 0
+    else:
+        return pow(x, 0xFFFF, 0x10001)  
+ 
+ 
+ 
+def bytelist_to_debugstr(bytelist):
+    assert isinstance(bytelist, (list, tuple))
+    return "[" + " ".join("{}".format(b) for b in bytelist) + "]"
+ 
+def encrypt(block, key, printdebug=False):
+    return _crypt(block, key, "encrypt", printdebug)
+ 
+ 
+ 
+def decrypt(block, key, printdebug=False):
+    return _crypt(block, key, "decrypt", printdebug)
+ 
+def _crypt(block, key, direction, printdebug):
+ 
+    #assert isinstance(block, list) and len(block) == 8
+    #assert isinstance(key, list) and len(key) == 16
+   # assert direction in ("encrypt", "decrypt")
+    #print("{}".format(direction))
+ 
+    keyschedule = _expand_key_schedule(key)
+    if direction == "decrypt":
+        keyschedule = _invert_key_schedule(keyschedule)
+    
+    w = int(block[0]) << 8 | int(block[1])
+    x = int(block[2]) << 8 | int(block[3])
+    y = int(block[4]) << 8 | int(block[5])
+    z = int(block[6]) << 8 | int(block[7])
+    
+ 
+    # Выполнить 8 раундов шифрования / дешифрования
+    for i in range(_NUM_ROUNDS):
+        #print("Round {}: block = [{:04X} {:04X} {:04X} {:04X}]".format(i, w, x, y, z))
+        j = i * 6
+        w = _multiply(w, keyschedule[j + 0])
+        x = _add(x, keyschedule[j + 1])
+        y = _add(y, keyschedule[j + 2])
+        z = _multiply(z, keyschedule[j + 3])
+        u = _multiply(w ^ y, keyschedule[j + 4])
+        v = _multiply(_add(x ^ z, u), keyschedule[j + 5])
+        u = _add(u, v)
+        w ^= v
+        x ^= u
+        y ^= v
+        z ^= u
+        x, y = y, x
+ 
+    #print("Round {}: block = [{:04X} {:04X} {:04X} {:04X}]".format(_NUM_ROUNDS, w, x, y, z))
+    x, y = y, x
+    w = _multiply(w, keyschedule[-4])
+    x = _add(x, keyschedule[-3])
+    y = _add(y, keyschedule[-2])
+    z = _multiply(z, keyschedule[-1])
+    (w >> 8, w & 0xFF,
+    x >> 8, x & 0xFF,
+    y >> 8, y & 0xFF,
+    z >> 8, z & 0xFF)
+ 
+    return [
+            w >> 8, w & 0xFF,
+            x >> 8, x & 0xFF,
+            y >> 8, y & 0xFF,
+            z >> 8, z & 0xFF]
+ 
+ 
+def _expand_key_schedule(key):
+    bigkey = 0
+    for b in key:
+        assert 0 <= int(b) <= 255
+        bigkey = (bigkey << 8) | int(b)
+        
+    assert 0 <= bigkey < (1 << 128) 
+    bigkey = (bigkey << 16) | (bigkey >> 112)
+    
+    result = []
+    for i in range(_NUM_ROUNDS * 6 + 4):
+        offset = (i * 16 + i // 8 * 25) % 128
+        result.append((bigkey >> (128 - offset)) & 0xFFFF)
+ 
+    return tuple(result)
+ 
+ 
+def _invert_key_schedule(keysch):
+    assert isinstance(keysch, tuple) and len(keysch) % 6 == 4
+    result = []
+    result.append(_reciprocal(keysch[-4]))
+    result.append(_negate(keysch[-3]))
+    result.append(_negate(keysch[-2]))
+    result.append(_reciprocal(keysch[-1]))
+    result.append(keysch[-6])
+    result.append(keysch[-5])
+    
+    for i in range(1, _NUM_ROUNDS):
+        j = i * 6
+        result.append(_reciprocal(keysch[-j - 4]))
+        result.append(_negate(keysch[-j - 2]))
+        result.append(_negate(keysch[-j - 3]))
+        result.append(_reciprocal(keysch[-j - 1]))
+        result.append(keysch[-j - 6])
+        result.append(keysch[-j - 5])
+    
+    result.append(_reciprocal(keysch[0]))
+    result.append(_negate(keysch[1]))
+    result.append(_negate(keysch[2]))
+    result.append(_reciprocal(keysch[3]))
+    return tuple(result)
+ 
+def sis10(text):
+    sis = []
+    for t in text:
+        i = ord(t)
+        sis.append(i)
+    return sis
+ 
+def STR(Kod):
+    u = ''
+    for i in range(len(Kod)):
+        u = u + chr(Kod[i])
+    return u
+ 
+def CFB(text, key):
+    n = sis10(text)
+    Kod = []
+    u = 0
+    y = []
+    while len(n) > 0:
+        if len(n) > 8:
+            y = encrypt(n[:8], key)
+            key = y * 2;print(key)
+            n = n[8:]
+            
+        else:
+            u = 8 - len(n)
+            y = encrypt(n + [0] * u, key)
+            n = []
+        Kod = Kod + y
+    kod = STR(Kod)
+ 
+    return kod, u
+ 
+def decr_CFB(text, x, u = 0):
+    n = sis10(text)
+    Kod = []
+    y = []
+    while len(n) > 0:
+        if len(n) > 8:
+            y = decrypt(n[:8], x)
+            x = (n[:8]) * 2
+            n = n[8:]
+        else:
+            if u > 0:
+                y = decrypt(n[:8], x)
+                y = y[:8 - u]
+                n = []
+            else:
+                y = decrypt(n[:8], x)
+                x = (n[:8]) * 2
+                n = []
+ 
+        Kod = Kod + y
+    kod = STR(Kod)
+    return kod
+ 
+ 
+ 
+ 
+fin = open('text_IDEA.txt', 'rt' )
+text1 = fin.read()
+fin.close()
+#ECB(text1)
+ 
+key="KEYASD"
+KEY=[]
+for s in key:
+            elem = int(text_to_bits(s), 2)
+            KEY.append(elem)
+ 
+Kod, u = CFB(text1,KEY )
+print(Kod)
+fout = open('CFB.txt', 'wt',encoding='utf-8')
+fout.write(Kod)
+fout.close()
+fin = open('CFB.txt', 'rt',encoding='utf-8' )
+kode = fin.read()
+fin.close()
+text = decr_CFB(kode,KEY, u)
+print(text)
+fout = open('DECR_CFB.txt', 'wt')
+fout.write(text)
+fout.close()
